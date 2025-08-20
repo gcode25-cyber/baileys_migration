@@ -22,6 +22,7 @@ export class WhatsAppService {
   private connectionCheckInterval: NodeJS.Timeout | null = null;
   private currentState: string = 'DISCONNECTED';
   private isPhoneConnected: boolean = false;
+  private reconnectAttempts: number = 0;
   private lastStateCheck: Date = new Date();
   private authState: any = null;
   private saveCreds: any = null;
@@ -140,8 +141,8 @@ export class WhatsAppService {
         auth: state,
         logger,
         printQRInTerminal: false, // We'll handle QR code generation ourselves
-        defaultQueryTimeoutMs: 60000,
-        keepAliveIntervalMs: 30000,
+        defaultQueryTimeoutMs: 120000,
+        keepAliveIntervalMs: 90000,
         generateHighQualityLinkPreview: true,
         syncFullHistory: true, // Enable full history sync
         shouldSyncHistoryMessage: () => true, // Sync history messages
@@ -205,15 +206,31 @@ export class WhatsAppService {
           phoneConnected: false
         });
 
-        if (shouldReconnect) {
-          console.log('⏳ Waiting 10 seconds before reconnecting to avoid rapid reconnections...');
-          setTimeout(() => this.initializeClient(), 10000);
+        // Only reconnect for specific disconnect reasons, not timeouts
+        const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
+        if (shouldReconnect && statusCode !== DisconnectReason.timedOut && statusCode !== DisconnectReason.badSession) {
+          // Exponential backoff for reconnection (15s to 60s max)
+          const delay = Math.min(this.reconnectAttempts * 15000, 60000);
+          console.log(`⏳ Waiting ${delay/1000} seconds before reconnecting (attempt ${this.reconnectAttempts + 1})...`);
+          this.reconnectAttempts++;
+          
+          if (this.reconnectAttempts <= 3) { // Max 3 attempts
+            setTimeout(() => this.initializeClient(), delay);
+          } else {
+            console.log('❌ Max reconnection attempts reached, stopping auto-reconnect');
+          }
+        } else if (statusCode === DisconnectReason.loggedOut) {
+          console.log('🚪 User logged out, clearing session');
+          this.reconnectAttempts = 0;
+        } else {
+          console.log('🚫 Not reconnecting due to disconnect reason:', statusCode);
         }
       } else if (connection === 'open') {
         console.log('✅ WhatsApp connection opened successfully');
         this.currentState = 'CONNECTED';
         this.isReady = true;
         this.isPhoneConnected = true;
+        this.reconnectAttempts = 0; // Reset reconnection attempts on successful connection
         
         this.handleConnectionSuccess();
       }
