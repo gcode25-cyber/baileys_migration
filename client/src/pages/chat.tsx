@@ -116,7 +116,6 @@ export default function ChatPage() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          accountId: 'primary',
           phoneNumber: data.phoneNumber,
           message: data.message
         })
@@ -150,7 +149,6 @@ export default function ChatPage() {
   const sendMediaMutation = useMutation({
     mutationFn: async (data: { phoneNumber: string; message: string; file: File }) => {
       const formData = new FormData();
-      formData.append('accountId', 'primary');
       formData.append('phoneNumber', data.phoneNumber);
       formData.append('message', data.message);
       formData.append('media', data.file);

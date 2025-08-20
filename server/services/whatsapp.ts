@@ -566,39 +566,60 @@ export class WhatsAppService {
       
       // Try to request chat history from WhatsApp
       try {
-        await this.socket.chatModify({ archive: false } as any);
+        await this.socket.chatModify({ archive: false } as any, '' as any);
       } catch (chatModifyError: any) {
         console.log('💬 Chat modify not available:', chatModifyError.message);
       }
       
-      // Also try to load from message history
+      // Try to get contacts and chats from WhatsApp store
       try {
-        const messages = await this.socket.fetchMessageHistory(50, undefined as any, undefined as any);
-        if (messages && messages.length > 0) {
-          console.log(`💬 Found ${messages.length} message history entries`);
+        console.log('💬 Requesting chats from WhatsApp store...');
+        const store = this.socket.store;
+        if (store) {
+          const chats = store.chats?.all?.() || [];
+          const contacts = store.contacts || {};
           
-          // Process messages to extract chats
-          messages.forEach((msg: any) => {
-            if (msg.key && msg.key.remoteJid) {
-              const jid = msg.key.remoteJid;
-              if (!this.chatData.has(jid)) {
-                const chatData = {
-                  id: jid,
-                  name: isJidGroup(jid) ? 'Group Chat' : jid.split('@')[0],
-                  isGroup: isJidGroup(jid),
-                  unreadCount: 0,
-                  lastMessageTime: msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now(),
-                  lastMessage: msg.message?.conversation || msg.message?.extendedTextMessage?.text || 'Media message'
-                };
-                
-                this.chatData.set(jid, chatData);
-                console.log(`💬 Stored chat from message history: ${chatData.name}`);
-              }
+          console.log(`💬 Found ${chats.length} chats in store`);
+          console.log(`📞 Found ${Object.keys(contacts).length} contacts in store`);
+          
+          // Process chats from store
+          chats.forEach((chat: any) => {
+            if (chat.id) {
+              const chatData = {
+                id: chat.id,
+                name: chat.name || chat.id.split('@')[0],
+                isGroup: isJidGroup(chat.id),
+                unreadCount: chat.unreadCount || 0,
+                lastMessageTime: chat.conversationTimestamp ? Number(chat.conversationTimestamp) * 1000 : Date.now(),
+                lastMessage: null
+              };
+              
+              this.chatData.set(chat.id, chatData);
+              console.log(`💬 Stored chat from store: ${chatData.name}`);
+            }
+          });
+          
+          // Process contacts from store
+          Object.entries(contacts).forEach(([jid, contact]: [string, any]) => {
+            if (jid && !isJidGroup(jid)) {
+              const phoneNumber = jid.split('@')[0];
+              const contactData = {
+                id: jid,
+                name: contact.name || contact.notify || contact.verifiedName || phoneNumber,
+                number: phoneNumber,
+                isUser: true,
+                isMyContact: true,
+                isWAContact: true,
+                profilePic: null
+              };
+              
+              this.contactData.set(jid, contactData);
+              console.log(`📞 Stored contact from store: ${contactData.name}`);
             }
           });
         }
-      } catch (msgError: any) {
-        console.log('💬 Message history not available:', msgError.message);
+      } catch (storeError: any) {
+        console.log('💬 Store access not available:', storeError.message);
       }
       
       const chatCount = this.chatData.size;
