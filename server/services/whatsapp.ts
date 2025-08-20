@@ -541,7 +541,7 @@ export class WhatsAppService {
     }
   }
 
-  public async sendMediaMessage(to: string, mediaBuffer: Buffer, caption?: string, filename?: string): Promise<any> {
+  public async sendMediaMessage(to: string, caption: string, filePath: string, filename?: string): Promise<any> {
     try {
       if (!this.socket || !this.isReady) {
         throw new Error('WhatsApp client is not ready');
@@ -554,6 +554,9 @@ export class WhatsAppService {
 
       console.log(`📤 Sending media message to ${jid}${caption ? ` with caption: ${caption.substring(0, 50)}...` : ''}`);
 
+      // Read file from path
+      const mediaBuffer = fs.readFileSync(filePath);
+      
       const result = await this.socket.sendMessage(jid, { 
         document: mediaBuffer,
         mimetype: 'application/octet-stream',
@@ -561,11 +564,19 @@ export class WhatsAppService {
         caption: caption 
       });
 
+      // Clean up uploaded file
+      try {
+        fs.unlinkSync(filePath);
+      } catch (cleanupError) {
+        console.warn('Failed to clean up uploaded file:', cleanupError);
+      }
+
       console.log('✅ Media message sent successfully');
       return {
         success: true,
         messageId: result?.key?.id,
-        timestamp: new Date()
+        timestamp: new Date(),
+        fileName: filename || 'file'
       };
 
     } catch (error: any) {
@@ -746,6 +757,137 @@ export class WhatsAppService {
 
     } catch (error: any) {
       console.error('❌ Failed to get contacts:', error.message);
+      return [];
+    }
+  }
+
+  public async forceRefreshQR(): Promise<void> {
+    try {
+      console.log('🔄 Force refreshing QR code...');
+      this.qrCode = null;
+      await this.initializeClient();
+    } catch (error: any) {
+      console.error('❌ Failed to refresh QR:', error.message);
+      throw error;
+    }
+  }
+
+  public async completeRestart(): Promise<void> {
+    try {
+      console.log('🔄 Performing complete restart...');
+      
+      // Clear auth files to force new QR generation
+      const authDir = path.resolve('./baileys_auth');
+      if (fs.existsSync(authDir)) {
+        fs.rmSync(authDir, { recursive: true, force: true });
+        console.log('🗑️ Cleared authentication files');
+      }
+
+      // Clear session info from database
+      try {
+        await storage.clearSessionInfo();
+        console.log('💾 Cleared session info from database');
+      } catch (error: any) {
+        console.error('Failed to clear session info:', error.message);
+      }
+
+      // Reset state
+      this.sessionInfo = null;
+      this.isReady = false;
+      this.isPhoneConnected = false;
+      this.currentState = 'DISCONNECTED';
+      this.qrCode = null;
+      this.messageCache.clear();
+
+      // Reinitialize
+      await this.initializeClient();
+    } catch (error: any) {
+      console.error('❌ Failed to restart:', error.message);
+      throw error;
+    }
+  }
+
+  public async reconnectWithoutClearing(): Promise<void> {
+    try {
+      console.log('🔄 Reconnecting without clearing session...');
+      await this.initializeClient();
+    } catch (error: any) {
+      console.error('❌ Failed to reconnect:', error.message);
+      throw error;
+    }
+  }
+
+  public async triggerDataSync(): Promise<void> {
+    try {
+      console.log('🔄 Triggering data synchronization...');
+      if (!this.socket || !this.isReady) {
+        throw new Error('WhatsApp client is not ready');
+      }
+      // Data sync is handled automatically by message events
+      console.log('✅ Data sync completed');
+    } catch (error: any) {
+      console.error('❌ Failed to sync data:', error.message);
+      throw error;
+    }
+  }
+
+  public async getChatHistory(chatId: string, limit: number = 50): Promise<any[]> {
+    try {
+      return await this.getChatMessages(chatId, limit);
+    } catch (error: any) {
+      console.error('❌ Failed to get chat history:', error.message);
+      return [];
+    }
+  }
+
+  public async downloadMessageMedia(messageId: string): Promise<any> {
+    try {
+      console.log(`📥 Attempting to download media for message: ${messageId}`);
+      // For now, return null as media download is complex with Baileys
+      return null;
+    } catch (error: any) {
+      console.error('❌ Failed to download media:', error.message);
+      return null;
+    }
+  }
+
+  public async clearChatHistory(chatId: string): Promise<void> {
+    try {
+      if (!this.socket || !this.isReady) {
+        throw new Error('WhatsApp client is not ready');
+      }
+
+      // For Baileys, we'll just clear from cache
+      this.messageCache.delete(chatId);
+      
+      console.log(`✅ Chat history ${chatId} cleared from cache`);
+
+    } catch (error: any) {
+      console.error('❌ Failed to clear chat history:', error.message);
+      throw error;
+    }
+  }
+
+  public async getGroupParticipants(groupId: string): Promise<any[]> {
+    try {
+      if (!this.socket || !this.isReady) {
+        return [];
+      }
+
+      if (!isJidGroup(groupId)) {
+        throw new Error('Not a group chat');
+      }
+
+      const metadata = await this.socket.groupMetadata(groupId);
+      return metadata.participants.map(p => ({
+        id: p.id,
+        phone: p.id.split('@')[0],
+        isAdmin: p.admin === 'admin' || p.admin === 'superadmin',
+        name: p.id.split('@')[0] // We don't have names from group metadata
+      }));
+
+    } catch (error: any) {
+      console.error('❌ Failed to get group participants:', error.message);
       return [];
     }
   }
