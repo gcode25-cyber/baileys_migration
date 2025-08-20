@@ -283,6 +283,53 @@ export class WhatsAppService {
       // Broadcast updated contact list
       this.broadcastToClients('contacts_updated', { count: contacts.length });
     });
+    
+    // Messages - to extract chats from recent messages
+    this.socket.ev.on('messages.upsert', (msgUpdate) => {
+      console.log('💬 Messages upsert:', msgUpdate.messages.length);
+      
+      msgUpdate.messages.forEach((msg) => {
+        if (msg.key && msg.key.remoteJid) {
+          const jid = msg.key.remoteJid;
+          
+          // Create chat entry if it doesn't exist
+          if (!this.chatData.has(jid)) {
+            const isGroup = isJidGroup(jid);
+            const chatData = {
+              id: jid,
+              name: isGroup ? (msg.pushName || 'Group Chat') : (msg.pushName || jid.split('@')[0]),
+              isGroup: isGroup,
+              unreadCount: 0,
+              lastMessageTime: msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now(),
+              lastMessage: msg.message?.conversation || msg.message?.extendedTextMessage?.text || 'Media message'
+            };
+            
+            this.chatData.set(jid, chatData);
+            console.log(`💬 New chat detected: ${chatData.name}`);
+            
+            // Also add to groups if it's a group
+            if (isGroup && !this.groupData.has(jid)) {
+              const groupData = {
+                id: jid,
+                name: chatData.name,
+                description: '',
+                participantsCount: 0,
+                isAdmin: false,
+                participants: []
+              };
+              this.groupData.set(jid, groupData);
+              console.log(`👥 New group detected: ${groupData.name}`);
+            }
+            
+            // Broadcast updates
+            this.broadcastToClients('chats_updated', { count: this.chatData.size });
+            if (isGroup) {
+              this.broadcastToClients('groups_updated', { count: this.groupData.size });
+            }
+          }
+        }
+      });
+    });
 
     // Groups
     this.socket.ev.on('groups.upsert', (groups) => {
@@ -420,14 +467,62 @@ export class WhatsAppService {
       this.chatData.clear();
       this.groupData.clear();
       
+      // Wait a bit for events to populate data
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      
       // Try to load real contacts and chats
       await this.loadRealContacts();
       await this.loadRealChats();
+      await this.loadGroups();
       
       console.log('📱 Real WhatsApp data loaded successfully');
       
     } catch (error: any) {
       console.error('❌ Error loading initial data:', error.message);
+    }
+  }
+  
+  private async loadGroups() {
+    try {
+      if (!this.socket || !this.isReady) return;
+      
+      console.log('👥 Loading your WhatsApp groups...');
+      
+      // Try to get group metadata
+      try {
+        const groupIds = Array.from(this.groupData.keys());
+        console.log(`👥 Found ${groupIds.length} groups from chats`);
+        
+        // Load group metadata for each group
+        for (const groupId of groupIds) {
+          try {
+            const groupMetadata = await this.socket.groupMetadata(groupId as string);
+            if (groupMetadata) {
+              const groupData = {
+                id: groupId,
+                name: groupMetadata.subject || 'Unknown Group',
+                description: groupMetadata.desc || '',
+                participantsCount: groupMetadata.participants?.length || 0,
+                isAdmin: false,
+                participants: groupMetadata.participants || []
+              };
+              
+              this.groupData.set(groupId, groupData);
+              console.log(`👥 Updated group: ${groupData.name} (${groupData.participantsCount} members)`);
+            }
+          } catch (groupError: any) {
+            console.log(`👥 Could not load metadata for group ${groupId}:`, groupError.message);
+          }
+        }
+      } catch (error: any) {
+        console.log('👥 Group metadata loading failed:', error.message);
+      }
+      
+      const groupCount = this.groupData.size;
+      console.log(`👥 Total groups: ${groupCount}`);
+      
+    } catch (error: any) {
+      console.error('❌ Failed to load groups:', error.message);
     }
   }
   
@@ -437,30 +532,9 @@ export class WhatsAppService {
       
       console.log('📞 Loading your actual contacts...');
       
-      // In Baileys, contacts are typically loaded through the store or via messages
-      // Let's try to get contacts from the socket's contact store if available
-      const contacts = (this.socket as any).store?.contacts || {};
-      
-      let contactCount = 0;
-      Object.entries(contacts).forEach(([jid, contact]: [string, any]) => {
-        if (!isJidGroup(jid) && contact) {
-          const phoneNumber = jid.split('@')[0];
-          const contactData = {
-            id: jid,
-            name: contact.name || contact.notify || contact.verifiedName || phoneNumber,
-            number: phoneNumber,
-            isUser: true,
-            isMyContact: true,
-            isWAContact: true,
-            profilePic: null
-          };
-          
-          this.contactData.set(jid, contactData);
-          contactCount++;
-        }
-      });
-      
-      console.log(`📞 Loaded ${contactCount} real contacts`);
+      // Since contacts are already being loaded via events, just count what we have
+      const contactCount = this.contactData.size;
+      console.log(`📞 Found ${contactCount} contacts already loaded via events`);
       
     } catch (error: any) {
       console.error('❌ Failed to load real contacts:', error.message);
@@ -473,27 +547,45 @@ export class WhatsAppService {
       
       console.log('💬 Loading your actual chats...');
       
-      // Try to get chats from the socket's chat store if available
-      const chats = (this.socket as any).store?.chats || {};
+      // Try to request chat history from WhatsApp
+      try {
+        await this.socket.chatModify({ archive: false } as any);
+      } catch (chatModifyError: any) {
+        console.log('💬 Chat modify not available:', chatModifyError.message);
+      }
       
-      let chatCount = 0;
-      Object.entries(chats).forEach(([jid, chat]: [string, any]) => {
-        if (chat) {
-          const chatData = {
-            id: jid,
-            name: chat.name || jid.split('@')[0],
-            isGroup: isJidGroup(jid),
-            unreadCount: chat.unreadCount || 0,
-            lastMessageTime: chat.conversationTimestamp ? Number(chat.conversationTimestamp) * 1000 : Date.now(),
-            lastMessage: null
-          };
+      // Also try to load from message history
+      try {
+        const messages = await this.socket.fetchMessageHistory(50, undefined as any, undefined as any);
+        if (messages && messages.length > 0) {
+          console.log(`💬 Found ${messages.length} message history entries`);
           
-          this.chatData.set(jid, chatData);
-          chatCount++;
+          // Process messages to extract chats
+          messages.forEach((msg: any) => {
+            if (msg.key && msg.key.remoteJid) {
+              const jid = msg.key.remoteJid;
+              if (!this.chatData.has(jid)) {
+                const chatData = {
+                  id: jid,
+                  name: isJidGroup(jid) ? 'Group Chat' : jid.split('@')[0],
+                  isGroup: isJidGroup(jid),
+                  unreadCount: 0,
+                  lastMessageTime: msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now(),
+                  lastMessage: msg.message?.conversation || msg.message?.extendedTextMessage?.text || 'Media message'
+                };
+                
+                this.chatData.set(jid, chatData);
+                console.log(`💬 Stored chat from message history: ${chatData.name}`);
+              }
+            }
+          });
         }
-      });
+      } catch (msgError: any) {
+        console.log('💬 Message history not available:', msgError.message);
+      }
       
-      console.log(`💬 Loaded ${chatCount} real chats`);
+      const chatCount = this.chatData.size;
+      console.log(`💬 Total chats loaded: ${chatCount}`);
       
     } catch (error: any) {
       console.error('❌ Failed to load real chats:', error.message);
