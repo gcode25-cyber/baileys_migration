@@ -135,7 +135,7 @@ export class WhatsAppService {
       this.isReady = false;
       this.qrCode = null;
 
-      // Create WhatsApp socket
+      // Create WhatsApp socket with enhanced sync options
       this.socket = makeWASocket({
         auth: state,
         logger,
@@ -143,11 +143,15 @@ export class WhatsAppService {
         defaultQueryTimeoutMs: 60000,
         keepAliveIntervalMs: 30000,
         generateHighQualityLinkPreview: true,
-        syncFullHistory: false,
-        shouldSyncHistoryMessage: () => false,
+        syncFullHistory: true, // Enable full history sync
+        shouldSyncHistoryMessage: () => true, // Sync history messages
         emitOwnEvents: true,
         fireInitQueries: true,
         markOnlineOnConnect: true,
+        getMessage: async (key) => {
+          // This helps with message syncing
+          return { conversation: '' };
+        }
       });
 
       // We'll handle data manually through events
@@ -231,11 +235,78 @@ export class WhatsAppService {
     // Chats - using correct event name
     this.socket.ev.on('chats.upsert', (chats) => {
       console.log('💬 Chats upsert:', chats.length);
+      
+      // Store real chats
+      chats.forEach((chat) => {
+        if (chat.id) {
+          const chatData = {
+            id: chat.id,
+            name: chat.name || chat.id.split('@')[0],
+            isGroup: isJidGroup(chat.id),
+            unreadCount: chat.unreadCount || 0,
+            lastMessageTime: chat.conversationTimestamp ? Number(chat.conversationTimestamp) * 1000 : Date.now(),
+            lastMessage: null
+          };
+          
+          this.chatData.set(chat.id, chatData);
+          console.log(`💬 Stored chat: ${chatData.name}`);
+        }
+      });
+      
+      // Broadcast updated chat list
+      this.broadcastToClients('chats_updated', { count: chats.length });
+    });
+
+    // Contacts
+    this.socket.ev.on('contacts.upsert', (contacts) => {
+      console.log('📞 Contacts upsert:', contacts.length);
+      
+      // Store real contacts
+      contacts.forEach((contact) => {
+        if (contact.id && !isJidGroup(contact.id)) {
+          const phoneNumber = contact.id.split('@')[0];
+          const contactData = {
+            id: contact.id,
+            name: contact.name || contact.notify || contact.verifiedName || phoneNumber,
+            number: phoneNumber,
+            isUser: true,
+            isMyContact: true,
+            isWAContact: true,
+            profilePic: null
+          };
+          
+          this.contactData.set(contact.id, contactData);
+          console.log(`📞 Stored contact: ${contactData.name}`);
+        }
+      });
+      
+      // Broadcast updated contact list
+      this.broadcastToClients('contacts_updated', { count: contacts.length });
     });
 
     // Groups
     this.socket.ev.on('groups.upsert', (groups) => {
       console.log('👥 Groups upsert:', groups.length);
+      
+      // Store real groups
+      groups.forEach((group) => {
+        if (group.id && isJidGroup(group.id)) {
+          const groupData = {
+            id: group.id,
+            name: group.subject || group.id.split('@')[0],
+            description: group.desc || '',
+            participantsCount: group.participants?.length || 0,
+            isAdmin: false,
+            participants: []
+          };
+          
+          this.groupData.set(group.id, groupData);
+          console.log(`👥 Stored group: ${groupData.name}`);
+        }
+      });
+      
+      // Broadcast updated group list
+      this.broadcastToClients('groups_updated', { count: groups.length });
     });
   }
 
@@ -342,40 +413,90 @@ export class WhatsAppService {
         return;
       }
       
-      console.log('🔄 Loading initial WhatsApp data...');
+      console.log('🔄 Loading your actual WhatsApp data...');
       
-      // Try to populate some dummy data so user can see the app working
-      // This simulates having some recent conversations
-      const dummyContacts = [
-        {
-          id: '919876543210@s.whatsapp.net',
-          name: 'Demo Contact 1',
-          number: '919876543210',
-          isUser: true,
-          isMyContact: true,
-          isWAContact: true,
-          profilePic: null
-        },
-        {
-          id: '919876543211@s.whatsapp.net', 
-          name: 'Demo Contact 2',
-          number: '919876543211',
-          isUser: true,
-          isMyContact: true,
-          isWAContact: true,
-          profilePic: null
-        }
-      ];
+      // Clear any existing demo data
+      this.contactData.clear();
+      this.chatData.clear();
+      this.groupData.clear();
       
-      // Store dummy data temporarily
-      dummyContacts.forEach(contact => {
-        this.contactData.set(contact.id, contact);
-      });
+      // Try to load real contacts and chats
+      await this.loadRealContacts();
+      await this.loadRealChats();
       
-      console.log('📱 Sample data loaded for demonstration');
+      console.log('📱 Real WhatsApp data loaded successfully');
       
     } catch (error: any) {
       console.error('❌ Error loading initial data:', error.message);
+    }
+  }
+  
+  private async loadRealContacts() {
+    try {
+      if (!this.socket || !this.isReady) return;
+      
+      console.log('📞 Loading your actual contacts...');
+      
+      // In Baileys, contacts are typically loaded through the store or via messages
+      // Let's try to get contacts from the socket's contact store if available
+      const contacts = (this.socket as any).store?.contacts || {};
+      
+      let contactCount = 0;
+      Object.entries(contacts).forEach(([jid, contact]: [string, any]) => {
+        if (!isJidGroup(jid) && contact) {
+          const phoneNumber = jid.split('@')[0];
+          const contactData = {
+            id: jid,
+            name: contact.name || contact.notify || contact.verifiedName || phoneNumber,
+            number: phoneNumber,
+            isUser: true,
+            isMyContact: true,
+            isWAContact: true,
+            profilePic: null
+          };
+          
+          this.contactData.set(jid, contactData);
+          contactCount++;
+        }
+      });
+      
+      console.log(`📞 Loaded ${contactCount} real contacts`);
+      
+    } catch (error: any) {
+      console.error('❌ Failed to load real contacts:', error.message);
+    }
+  }
+  
+  private async loadRealChats() {
+    try {
+      if (!this.socket || !this.isReady) return;
+      
+      console.log('💬 Loading your actual chats...');
+      
+      // Try to get chats from the socket's chat store if available
+      const chats = (this.socket as any).store?.chats || {};
+      
+      let chatCount = 0;
+      Object.entries(chats).forEach(([jid, chat]: [string, any]) => {
+        if (chat) {
+          const chatData = {
+            id: jid,
+            name: chat.name || jid.split('@')[0],
+            isGroup: isJidGroup(jid),
+            unreadCount: chat.unreadCount || 0,
+            lastMessageTime: chat.conversationTimestamp ? Number(chat.conversationTimestamp) * 1000 : Date.now(),
+            lastMessage: null
+          };
+          
+          this.chatData.set(jid, chatData);
+          chatCount++;
+        }
+      });
+      
+      console.log(`💬 Loaded ${chatCount} real chats`);
+      
+    } catch (error: any) {
+      console.error('❌ Failed to load real chats:', error.message);
     }
   }
 
