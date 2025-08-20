@@ -269,10 +269,22 @@ export class WhatsAppService {
       const userInfo = this.socket.user;
       if (userInfo) {
         const phoneNumber = userInfo.id.split('@')[0];
-        const userName = userInfo.name || userInfo.verifiedName || phoneNumber;
+        // Extract just the phone number part, removing any additional identifiers
+        const cleanPhoneNumber = phoneNumber.split(':')[0];
+        
+        // Use verified name if available, otherwise format the phone number nicely
+        let userName = userInfo.verifiedName || userInfo.name;
+        if (!userName || userName === userInfo.id || userName === phoneNumber) {
+          // Format phone number as +91 94284 63575 (example for Indian numbers)
+          if (cleanPhoneNumber.startsWith('91') && cleanPhoneNumber.length === 12) {
+            userName = `+91 ${cleanPhoneNumber.slice(2, 7)} ${cleanPhoneNumber.slice(7)}`;
+          } else {
+            userName = `+${cleanPhoneNumber}`;
+          }
+        }
         
         this.sessionInfo = {
-          number: phoneNumber,
+          number: cleanPhoneNumber,
           name: userName,
           loginTime: new Date().toISOString()
         };
